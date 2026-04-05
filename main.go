@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,17 +20,16 @@ import (
 )
 
 const (
-	// ID do grupo que será atualizado
-	GROUP_ID = "120363421307070094@g.us"
-	
-	// Data alvo: 29/novembro/2025 às 14:00 (horário de São Paulo)
-	TARGET_YEAR  = 2025
-	TARGET_MONTH = time.November
-	TARGET_DAY   = 29
-	TARGET_HOUR  = 14
-	
+	// Data alvo: 01/maio/2026 (horário de São Paulo)
+	TARGET_YEAR  = 2026
+	TARGET_MONTH = time.May
+	TARGET_DAY   = 1
+
 	// Timezone de São Paulo
 	TIMEZONE = "America/Sao_Paulo"
+
+	// Arquivo para persistir o ID do grupo selecionado
+	GROUP_ID_FILE = "./sessions/group_id.txt"
 )
 
 func main() {
@@ -94,81 +96,63 @@ func main() {
 	// Aguardar um pouco para garantir que está tudo sincronizado
 	time.Sleep(2 * time.Second)
 
-	// Atualizar o nome do grupo imediatamente
-	updateGroupName(client, location)
+	// Selecionar grupo no terminal e salvar o ID
+	groupID, err := selectGroupID(client)
+	if err != nil {
+		fmt.Printf("❌ Erro ao selecionar grupo: %v\n", err)
+		client.Disconnect()
+		return
+	}
+	fmt.Printf("📌 Grupo selecionado: %s\n", groupID)
 
-	// Calcular quanto tempo falta até a próxima hora cheia (horário de São Paulo)
+	// Atualizar o nome do grupo imediatamente
+	updateGroupName(client, location, groupID)
+
+	// Calcular quanto tempo falta até a próxima virada do dia (horário de São Paulo)
 	now := time.Now().In(location)
-	nextHour := now.Truncate(time.Hour).Add(time.Hour)
-	durationUntilNextHour := nextHour.Sub(now)
+	nextDailyUpdate := getNextDailyUpdate(location)
+	durationUntilNextUpdate := nextDailyUpdate.Sub(now)
 
 	fmt.Printf("\n🕐 Horário atual (São Paulo): %s\n", now.Format("02/01/2006 15:04:05"))
-	fmt.Printf("⏰ Bot iniciado! Próxima atualização às %s (em %v)\n", 
-		nextHour.Format("15:04"), 
-		durationUntilNextHour.Round(time.Second))
+	fmt.Printf("⏰ Bot iniciado! Próxima atualização diária às %s (em %v)\n",
+		nextDailyUpdate.Format("02/01/2006 15:04"),
+		durationUntilNextUpdate.Round(time.Second))
 	fmt.Printf("Pressione Ctrl+C para sair\n\n")
 
-	// Criar timer para a próxima hora cheia
-	firstTimer := time.NewTimer(durationUntilNextHour)
+	// Criar timer para a próxima virada do dia
+	dailyTimer := time.NewTimer(durationUntilNextUpdate)
+	defer dailyTimer.Stop()
 
-	// Criar ticker de heartbeat para verificar se está funcionando (a cada 5 minutos)
-	heartbeatTicker := time.NewTicker(5 * time.Minute)
+	// Criar ticker de heartbeat para verificar se está funcionando (a cada 30 minutos)
+	heartbeatTicker := time.NewTicker(30 * time.Minute)
 	defer heartbeatTicker.Stop()
 
 	// Capturar sinais de interrupção
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
-	firstTimerFired := false
-	var ticker *time.Ticker
-
 	// Loop principal
 	for {
 		select {
-		case t := <-firstTimer.C:
-			// Primeira atualização na hora cheia
+		case t := <-dailyTimer.C:
 			spTime := t.In(location)
-			fmt.Printf("\n[%s] ⏰ HORA CHEIA ATINGIDA - atualizando grupo...\n", spTime.Format("02/01/2006 15:04:05"))
-			updateGroupName(client, location)
-			nextUpdate := time.Now().In(location).Add(1 * time.Hour)
-			fmt.Printf("Próxima atualização às %s\n\n", nextUpdate.Format("15:04"))
-			
-			// Criar ticker para as próximas atualizações horárias
-			ticker = time.NewTicker(1 * time.Hour)
-			defer ticker.Stop()
-			firstTimerFired = true
-			
-		case t := <-func() <-chan time.Time {
-			if ticker != nil {
-				return ticker.C
-			}
-			// Retornar canal que nunca envia nada
-			return make(<-chan time.Time)
-		}():
-			spTime := t.In(location)
-			fmt.Printf("\n[%s] ⏰ HORA CHEIA ATINGIDA - atualizando grupo...\n", spTime.Format("02/01/2006 15:04:05"))
-			updateGroupName(client, location)
-			nextUpdate := time.Now().In(location).Add(1 * time.Hour)
-			fmt.Printf("Próxima atualização às %s\n\n", nextUpdate.Format("15:04"))
-			
+			fmt.Printf("\n[%s] 📅 VIRADA DO DIA - atualizando grupo...\n", spTime.Format("02/01/2006 15:04:05"))
+			updateGroupName(client, location, groupID)
+			nextDailyUpdate = getNextDailyUpdate(location)
+			durationUntilNextUpdate = nextDailyUpdate.Sub(time.Now().In(location))
+			fmt.Printf("Próxima atualização diária às %s\n\n", nextDailyUpdate.Format("02/01/2006 15:04"))
+			dailyTimer.Reset(durationUntilNextUpdate)
+
 		case t := <-heartbeatTicker.C:
 			spTime := t.In(location)
-			if !firstTimerFired {
-				nowSP := time.Now().In(location)
-				nextHourTime := nowSP.Truncate(time.Hour).Add(time.Hour)
-				timeUntil := nextHourTime.Sub(nowSP).Round(time.Second)
-				fmt.Printf("[%s] 💓 Bot ativo - próxima atualização às %s (em %v)\n", 
-					spTime.Format("15:04:05"),
-					nextHourTime.Format("15:04"),
-					timeUntil)
-			} else {
-				nowSP := time.Now().In(location)
-				nextHourTime := nowSP.Truncate(time.Hour).Add(time.Hour)
-				fmt.Printf("[%s] 💓 Bot ativo - próxima atualização às %s\n", 
-					spTime.Format("15:04:05"),
-					nextHourTime.Format("15:04"))
-			}
-			
+			nowSP := time.Now().In(location)
+			nextDaily := getNextDailyUpdate(location)
+			timeUntil := nextDaily.Sub(nowSP).Round(time.Second)
+			fmt.Printf("[%s] 💓 Bot ativo - próxima atualização diária às %s (em %v)\n",
+				spTime.Format("15:04:05"),
+				nextDaily.Format("02/01 15:04"),
+				timeUntil)
+
 			// Verificar se o cliente ainda está conectado
 			if !client.IsConnected() {
 				fmt.Println("⚠️  Conexão perdida, reconectando...")
@@ -179,7 +163,7 @@ func main() {
 					fmt.Println("✓ Reconectado com sucesso!")
 				}
 			}
-			
+
 		case <-c:
 			fmt.Println("\nDesconectando...")
 			client.Disconnect()
@@ -188,36 +172,126 @@ func main() {
 	}
 }
 
-// Função para calcular horas restantes até a data alvo
-func calculateRemainingHours(location *time.Location) int {
+// Função para calcular dias restantes até a data alvo (baseado em data, não hora)
+func calculateRemainingDays(location *time.Location) int {
 	now := time.Now().In(location)
-	target := time.Date(TARGET_YEAR, TARGET_MONTH, TARGET_DAY, TARGET_HOUR, 0, 0, 0, location)
-	
-	diff := target.Sub(now)
-	hours := int(diff.Hours())
-	
-	// Se já passou da data, retornar 0
-	if hours < 0 {
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
+	target := time.Date(TARGET_YEAR, TARGET_MONTH, TARGET_DAY, 0, 0, 0, 0, location)
+
+	diff := target.Sub(today)
+	days := int(diff.Hours() / 24)
+
+	// Se já passou da data, retornar 0 para manter o título especial
+	if days < 0 {
 		return 0
 	}
-	
-	return hours
+
+	return days
+}
+
+func getNextDailyUpdate(location *time.Location) time.Time {
+	now := time.Now().In(location)
+	return time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, location)
+}
+
+func buildGroupName(location *time.Location) string {
+	daysRemaining := calculateRemainingDays(location)
+	if daysRemaining == 0 {
+		return "Hoje é o grande dia 🎉🏖️"
+	}
+	return fmt.Sprintf("Faltam %d dias para esse tibas", daysRemaining)
+}
+
+func loadSavedGroupID() string {
+	data, err := os.ReadFile(GROUP_ID_FILE)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func saveGroupID(groupID string) error {
+	return os.WriteFile(GROUP_ID_FILE, []byte(strings.TrimSpace(groupID)), 0644)
+}
+
+func selectGroupID(client *whatsmeow.Client) (string, error) {
+	savedGroupID := loadSavedGroupID()
+	ctx := context.Background()
+	groups, err := client.GetJoinedGroups(ctx)
+	if err != nil {
+		if savedGroupID != "" {
+			fmt.Printf("⚠️  Não foi possível listar grupos agora. Usando ID salvo: %s\n", savedGroupID)
+			return savedGroupID, nil
+		}
+		return "", fmt.Errorf("erro ao listar grupos: %w", err)
+	}
+
+	if len(groups) == 0 {
+		if savedGroupID != "" {
+			fmt.Printf("⚠️  Nenhum grupo retornado. Usando ID salvo: %s\n", savedGroupID)
+			return savedGroupID, nil
+		}
+		return "", fmt.Errorf("nenhum grupo encontrado para esta conta")
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	savedIndex := -1
+	for i, g := range groups {
+		if g.JID.String() == savedGroupID {
+			savedIndex = i
+			break
+		}
+	}
+
+	if savedIndex >= 0 {
+		fmt.Printf("\n📌 Grupo salvo atual: %s | %s\n", groups[savedIndex].Name, savedGroupID)
+		fmt.Print("Pressione Enter para usar esse grupo, ou digite 'trocar' para escolher outro: ")
+		input, _ := reader.ReadString('\n')
+		if strings.TrimSpace(strings.ToLower(input)) != "trocar" {
+			return savedGroupID, nil
+		}
+	}
+
+	fmt.Println("\n📋 Grupos disponíveis:")
+	for i, g := range groups {
+		fmt.Printf("[%d] %s | %s\n", i+1, g.Name, g.JID.String())
+	}
+
+	for {
+		fmt.Print("\nDigite o número do grupo que deseja usar: ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("erro ao ler seleção: %w", err)
+		}
+
+		input = strings.TrimSpace(input)
+		index, err := strconv.Atoi(input)
+		if err != nil || index < 1 || index > len(groups) {
+			fmt.Println("❌ Opção inválida. Digite um número da lista.")
+			continue
+		}
+
+		selected := groups[index-1].JID.String()
+		if err := saveGroupID(selected); err != nil {
+			fmt.Printf("⚠️  Não foi possível salvar o grupo selecionado: %v\n", err)
+		} else {
+			fmt.Printf("✓ Grupo salvo em %s\n", GROUP_ID_FILE)
+		}
+		return selected, nil
+	}
 }
 
 // Função para atualizar o nome do grupo
-func updateGroupName(client *whatsmeow.Client, location *time.Location) {
-	hoursRemaining := calculateRemainingHours(location)
-	
-	// Formato: "Vamo lá dia 29 emm (faltam Xhoras)"
-	newName := fmt.Sprintf("Vamo lá dia 29 emm (faltam %dhoras)", hoursRemaining)
-	
+func updateGroupName(client *whatsmeow.Client, location *time.Location, groupID string) {
+	newName := buildGroupName(location)
+
 	// Parse do JID do grupo
-	groupJID, err := types.ParseJID(GROUP_ID)
+	groupJID, err := types.ParseJID(groupID)
 	if err != nil {
 		fmt.Printf("❌ Erro ao fazer parse do ID do grupo: %v\n", err)
 		return
 	}
-	
+
 	// Verificar se está conectado
 	if !client.IsConnected() {
 		fmt.Println("⚠️  Cliente não está conectado! Tentando reconectar...")
@@ -228,7 +302,7 @@ func updateGroupName(client *whatsmeow.Client, location *time.Location) {
 		}
 		time.Sleep(2 * time.Second)
 	}
-	
+
 	// Atualizar o nome do grupo
 	ctx := context.Background()
 	err = client.SetGroupName(ctx, groupJID, newName)
@@ -236,13 +310,7 @@ func updateGroupName(client *whatsmeow.Client, location *time.Location) {
 		fmt.Printf("❌ Erro ao atualizar nome do grupo: %v\n", err)
 		return
 	}
-	
+
 	timestamp := time.Now().In(location).Format("02/01/2006 15:04:05")
 	fmt.Printf("[%s] ✓ Nome do grupo atualizado: %s\n", timestamp, newName)
-	
-	// Se chegou a 0 horas, mostrar mensagem especial
-	if hoursRemaining == 0 {
-		fmt.Println("🎉 COMEÇOU COMEÇOU COMEÇOU!")
-	}
 }
-

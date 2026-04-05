@@ -1,13 +1,14 @@
-# Bot WhatsApp - Contador Regressivo
+# Bot WhatsApp - Contador Regressivo Diário
 
-Bot em Go que atualiza automaticamente o nome de um grupo do WhatsApp com uma contagem regressiva.
+Bot em Go que atualiza automaticamente o nome de um grupo do WhatsApp com uma contagem regressiva diária.
 
 ## Funcionalidades
 
 - 🔐 Autenticação via QR Code no terminal
-- ⏰ Atualização automática do nome do grupo nas horas cheias (16:00, 17:00, 18:00...)
+- 📅 Atualização automática do nome do grupo na virada de cada dia (00:00)
 - 🌍 Usa horário de São Paulo (America/Sao_Paulo)
-- 📅 Contagem regressiva até 29/11/2025 às 14:00 (horário de São Paulo)
+- 🎯 Contagem regressiva até 01/05/2026 (horário de São Paulo)
+- 🧭 Seletor de grupo no terminal (com salvamento automático do ID)
 - 💾 Armazenamento local de sessões (não precisa escanear QR code toda vez)
 
 ## Requisitos
@@ -26,8 +27,8 @@ go mod download
 go run main.go
 ```
 
-O bot atualiza nas **HORAS CHEIAS** de São Paulo (16:00, 17:00, 18:00...)  
-Exemplo: Se você rodar às 15:30, ele vai atualizar às 16:00, depois 17:00, 18:00, etc.
+O bot atualiza na **virada do dia** em São Paulo (00:00).  
+Também faz uma atualização imediata ao iniciar.
 
 3. Na primeira execução, um QR Code aparecerá no terminal. Escaneie com seu WhatsApp:
    - Abra o WhatsApp no celular
@@ -35,31 +36,44 @@ Exemplo: Se você rodar às 15:30, ele vai atualizar às 16:00, depois 17:00, 18
    - Toque em "Conectar um aparelho"
    - Escaneie o QR Code exibido no terminal
 
-4. O bot começará a atualizar o nome do grupo automaticamente nas horas cheias (horário de São Paulo)!
+4. Na primeira execução conectada, ele mostrará os grupos disponíveis:
+   - Digite o número do grupo desejado
+   - O ID fica salvo em `sessions/group_id.txt`
+   - Nas próximas execuções, você pode reaproveitar o grupo salvo ou trocar
+
+5. O bot começará a atualizar o nome do grupo automaticamente todos os dias (horário de São Paulo)!
 
 ## Configuração
 
-Para alterar o grupo, a data alvo ou o timezone, edite as constantes no arquivo `main.go`:
+Para alterar a data alvo ou o timezone, edite as constantes no arquivo `main.go`:
 
 ```go
 const (
-    GROUP_ID = "120363421307070094@g.us"  // ID do grupo
-    TARGET_YEAR  = 2025                   // Ano alvo
-    TARGET_MONTH = time.November          // Mês alvo
-    TARGET_DAY   = 29                     // Dia alvo
-    TARGET_HOUR  = 14                     // Hora alvo
-    TIMEZONE = "America/Sao_Paulo"        // Timezone de São Paulo
+    TARGET_YEAR  = 2026            // Ano alvo
+    TARGET_MONTH = time.May         // Mês alvo
+    TARGET_DAY   = 1                // Dia alvo
+    TIMEZONE = "America/Sao_Paulo"  // Timezone de São Paulo
 )
+```
+
+O ID do grupo é salvo automaticamente em:
+
+```txt
+sessions/group_id.txt
 ```
 
 ## Formato do nome do grupo
 
 O bot atualiza o nome do grupo no formato:
 ```
-Vamo lá dia 29 emm (faltam Xhoras)
+Faltam X dias para esse tibas
 ```
 
-Onde X é o número de horas restantes até a data alvo.
+No dia do evento (quando faltar 0 dias), ele usa:
+
+```
+Hoje é o grande dia 🎉🏖️
+```
 
 ## Sessões
 
@@ -68,8 +82,8 @@ As sessões são armazenadas na pasta `sessions/` e persistem entre execuções.
 ## Monitoramento
 
 O bot agora inclui:
-- **⏰ Atualização nas horas cheias:** Não importa quando você inicia, ele sempre atualiza nas horas cheias (ex: 16:00, 17:00, 18:00...)
-- **💓 Heartbeat:** Mostra status a cada 5 minutos com contador regressivo
+- **📅 Atualização diária:** Sempre atualiza na virada do dia (00:00) de São Paulo
+- **💓 Heartbeat:** Mostra status a cada 30 minutos com contador regressivo até a próxima virada
 - **🔄 Reconexão automática:** Se perder conexão, tenta reconectar
 - **📊 Logs detalhados:** Mostra quando cada atualização acontece
 
@@ -79,35 +93,35 @@ O bot agora inclui:
 🌍 Usando timezone: America/Sao_Paulo
 ✓ Conectado ao WhatsApp!
 
-🕐 Horário atual (São Paulo): 27/11/2025 15:30:45
-⏰ Bot iniciado! Próxima atualização às 16:00 (em 29m15s)
+🕐 Horário atual (São Paulo): 05/04/2026 15:30:45
+⏰ Bot iniciado! Próxima atualização diária às 06/04/2026 00:00 (em 8h29m15s)
 Pressione Ctrl+C para sair
 
-[15:35:45] 💓 Bot ativo - próxima atualização às 16:00 (em 24m15s)
-[15:40:45] 💓 Bot ativo - próxima atualização às 16:00 (em 19m15s)
+[16:00:45] 💓 Bot ativo - próxima atualização diária às 06/04 00:00 (em 7h59m15s)
+[16:30:45] 💓 Bot ativo - próxima atualização diária às 06/04 00:00 (em 7h29m15s)
 
-[27/11/2025 16:00:00] ⏰ HORA CHEIA ATINGIDA - atualizando grupo...
-[27/11/2025 16:00:00] ✓ Nome do grupo atualizado: Vamo lá dia 29 emm (faltam 46horas)
-Próxima atualização às 17:00
+[06/04/2026 00:00:00] 📅 VIRADA DO DIA - atualizando grupo...
+[06/04/2026 00:00:00] ✓ Nome do grupo atualizado: Faltam 25 dias para esse tibas
+Próxima atualização diária às 07/04/2026 00:00
 ```
 
 ## Troubleshooting
 
 **O bot não está atualizando automaticamente?**
 1. Verifique se o bot está rodando e veja os logs de heartbeat (💓)
-2. O heartbeat mostra quanto tempo falta até a próxima atualização
-3. Aguarde até a próxima hora cheia (16:00, 17:00, etc) do horário de São Paulo
-4. Você verá "⏰ HORA CHEIA ATINGIDA" quando atualizar
+2. O heartbeat mostra quanto tempo falta até a próxima atualização diária
+3. Aguarde até a virada do dia (00:00) no horário de São Paulo
+4. Você verá "📅 VIRADA DO DIA" quando atualizar
 
-**Como funciona a atualização nas horas cheias?**
+**Como funciona a atualização diária?**
 - O bot usa o **horário de São Paulo** (America/Sao_Paulo)
-- Calcula automaticamente quanto tempo falta até a próxima hora cheia
-- Não importa quando você inicia (15:10, 15:30, 15:50...), ele sempre atualiza na hora cheia de São Paulo (16:00)
-- Depois disso, atualiza a cada hora cheia: 17:00, 18:00, 19:00, etc.
+- Calcula automaticamente quanto tempo falta até a próxima virada do dia
+- Não importa quando você inicia, ele sempre agenda para 00:00 de São Paulo
+- Depois disso, atualiza diariamente em cada virada de dia
 
 **Importante:**
 - Todos os horários são baseados no timezone de São Paulo
-- A data alvo (29/11/2025 14:00) também é no horário de São Paulo
+- A data alvo (01/05/2026) também é no horário de São Paulo
 - Se você estiver em outro timezone, o bot vai considerar a hora de São Paulo
 
 # testemudarnomegrupo
