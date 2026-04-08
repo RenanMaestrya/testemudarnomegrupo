@@ -406,7 +406,8 @@ func main() {
 	time.Sleep(2 * time.Second)
 
 	// Selecionar grupo no terminal e salvar o ID
-	groupID, err := selectGroupID(client)
+	forceGroupSelection := shouldForceGroupSelection()
+	groupID, err := selectGroupID(client, forceGroupSelection)
 	if err != nil {
 		fmt.Printf("❌ Erro ao selecionar grupo: %v\n", err)
 		client.Disconnect()
@@ -627,7 +628,23 @@ func saveGroupID(groupID string) error {
 	return os.WriteFile(GROUP_ID_FILE, []byte(strings.TrimSpace(groupID)), 0644)
 }
 
-func selectGroupID(client *whatsmeow.Client) (string, error) {
+func shouldForceGroupSelection() bool {
+	for _, arg := range os.Args[1:] {
+		switch strings.TrimSpace(strings.ToLower(arg)) {
+		case "--trocar-grupo", "--select-group", "--change-group":
+			return true
+		}
+	}
+
+	switch strings.TrimSpace(strings.ToLower(os.Getenv("BOT_SELECT_GROUP"))) {
+	case "1", "true", "yes", "sim":
+		return true
+	}
+
+	return false
+}
+
+func selectGroupID(client *whatsmeow.Client, forceSelection bool) (string, error) {
 	savedGroupID := loadSavedGroupID()
 	groups, err := getJoinedGroupsWithRetry(client, 3)
 	if err != nil {
@@ -646,24 +663,22 @@ func selectGroupID(client *whatsmeow.Client) (string, error) {
 		return "", fmt.Errorf("nenhum grupo encontrado para esta conta")
 	}
 
+	if !forceSelection && savedGroupID != "" {
+		for _, g := range groups {
+			if g.JID.String() == savedGroupID {
+				fmt.Printf("📌 Usando grupo salvo automaticamente: %s | %s\n", g.Name, savedGroupID)
+				fmt.Println("💡 Para trocar, reinicie com --trocar-grupo")
+				return savedGroupID, nil
+			}
+		}
+		fmt.Printf("⚠️  Grupo salvo não está na lista atual. Será necessário escolher outro.\n")
+	}
+
+	if forceSelection {
+		fmt.Println("🔄 Troca de grupo solicitada. Escolha um grupo abaixo:")
+	}
+
 	reader := bufio.NewReader(os.Stdin)
-	savedIndex := -1
-	for i, g := range groups {
-		if g.JID.String() == savedGroupID {
-			savedIndex = i
-			break
-		}
-	}
-
-	if savedIndex >= 0 {
-		fmt.Printf("\n📌 Grupo salvo atual: %s | %s\n", groups[savedIndex].Name, savedGroupID)
-		fmt.Print("Pressione Enter para usar esse grupo, ou digite 'trocar' para escolher outro: ")
-		input, _ := reader.ReadString('\n')
-		if strings.TrimSpace(strings.ToLower(input)) != "trocar" {
-			return savedGroupID, nil
-		}
-	}
-
 	fmt.Println("\n📋 Grupos disponíveis:")
 	for i, g := range groups {
 		fmt.Printf("[%d] %s | %s\n", i+1, g.Name, g.JID.String())
