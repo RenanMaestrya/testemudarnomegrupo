@@ -4,21 +4,26 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
+	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -33,6 +38,321 @@ const (
 	// Arquivo para persistir o ID do grupo selecionado
 	GROUP_ID_FILE = "./sessions/group_id.txt"
 )
+
+type pendingCreateCota struct {
+	StartedAt time.Time
+}
+
+type groupCommandBot struct {
+	client      *whatsmeow.Client
+	targetGroup types.JID
+
+	mu          sync.Mutex
+	pendingCota map[string]pendingCreateCota
+}
+
+func newGroupCommandBot(client *whatsmeow.Client, targetGroup types.JID) *groupCommandBot {
+	return &groupCommandBot{
+		client:      client,
+		targetGroup: targetGroup,
+		pendingCota: make(map[string]pendingCreateCota),
+	}
+}
+
+func (b *groupCommandBot) HandleEvent(evt interface{}) {
+	switch v := evt.(type) {
+	case *events.Message:
+		b.handleMessage(v)
+	}
+}
+
+func (b *groupCommandBot) handleMessage(evt *events.Message) {
+	if evt == nil || evt.Message == nil {
+		return
+	}
+	if !evt.Info.IsGroup {
+		return
+	}
+	if evt.Info.Chat.String() != b.targetGroup.String() {
+		return
+	}
+
+	text := extractIncomingText(evt.Message)
+	if text == "" {
+		return
+	}
+
+	messageBody, hasBraces := extractBracedContent(text)
+	senderKey := buildSenderKey(evt.Info.Chat, evt.Info.Sender)
+
+	if b.isAwaitingCreateCota(senderKey) {
+		if !hasBraces {
+			return
+		}
+
+		command := normalizeCommand(messageBody)
+		if command == "criar cota" {
+			b.markAwaitingCreateCota(senderKey)
+			b.sendText(evt.Info.Chat, buildCreateCotaPrompt())
+			return
+		}
+
+		formattedMessage, err := buildCreateCotaMessage(messageBody)
+		if err != nil {
+			b.sendText(evt.Info.Chat, fmt.Sprintf("❌ %v\n\nUse o formato:\n{titulo, valor total, quantidade de pessoas, pix, nome do pix}", err))
+			return
+		}
+
+		b.clearAwaitingCreateCota(senderKey)
+		b.sendText(evt.Info.Chat, formattedMessage)
+		return
+	}
+
+	if !hasBraces {
+		return
+	}
+
+	switch normalizeCommand(messageBody) {
+	case "criar cota":
+		b.markAwaitingCreateCota(senderKey)
+		b.sendText(evt.Info.Chat, buildCreateCotaPrompt())
+	default:
+		b.sendText(evt.Info.Chat, "Comando não reconhecido. Use {criar cota}.")
+	}
+}
+
+func (b *groupCommandBot) sendText(to types.JID, text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	_, err := b.client.SendMessage(context.Background(), to, &waProto.Message{
+		Conversation: proto.String(text),
+	})
+	if err != nil {
+		fmt.Printf("❌ Erro ao enviar mensagem no grupo %s: %v\n", to.String(), err)
+	}
+}
+
+func (b *groupCommandBot) isAwaitingCreateCota(senderKey string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, exists := b.pendingCota[senderKey]
+	return exists
+}
+
+func (b *groupCommandBot) markAwaitingCreateCota(senderKey string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pendingCota[senderKey] = pendingCreateCota{StartedAt: time.Now()}
+}
+
+func (b *groupCommandBot) clearAwaitingCreateCota(senderKey string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.pendingCota, senderKey)
+}
+
+func buildSenderKey(chatJID types.JID, senderJID types.JID) string {
+	return chatJID.String() + "|" + senderJID.String()
+}
+
+func extractIncomingText(msg *waProto.Message) string {
+	if msg == nil {
+		return ""
+	}
+
+	if text := strings.TrimSpace(msg.GetConversation()); text != "" {
+		return text
+	}
+
+	if text := strings.TrimSpace(msg.GetExtendedTextMessage().GetText()); text != "" {
+		return text
+	}
+
+	return ""
+}
+
+func extractBracedContent(text string) (string, bool) {
+	text = strings.TrimSpace(text)
+	if len(text) < 3 {
+		return "", false
+	}
+	if !strings.HasPrefix(text, "{") || !strings.HasSuffix(text, "}") {
+		return "", false
+	}
+
+	content := strings.TrimSpace(text[1 : len(text)-1])
+	if content == "" {
+		return "", false
+	}
+	return content, true
+}
+
+func normalizeCommand(command string) string {
+	command = strings.TrimSpace(strings.ToLower(command))
+	command = strings.Join(strings.Fields(command), " ")
+	return command
+}
+
+func buildCreateCotaPrompt() string {
+	return "Me envie os dados respondendo nesse formato:\n{titulo, valor total, quantidade de pessoas, pix, nome do pix}\n\nExemplo:\n{LISTA DE PAGAMENTO DA VAN ATÉ 13/04, 2000, 15, 84996465312, Lucas Matheus Alexandre da Silva}"
+}
+
+func buildCreateCotaMessage(payload string) (string, error) {
+	parts := splitAndTrim(payload, ",")
+	if len(parts) != 5 {
+		return "", fmt.Errorf("formato inválido. São 5 campos separados por vírgula")
+	}
+
+	title := parts[0]
+	totalRaw := parts[1]
+	peopleRaw := parts[2]
+	pix := parts[3]
+	pixOwner := parts[4]
+
+	if title == "" || totalRaw == "" || peopleRaw == "" || pix == "" || pixOwner == "" {
+		return "", fmt.Errorf("todos os campos são obrigatórios")
+	}
+
+	total, err := parseBrazilianMoney(totalRaw)
+	if err != nil {
+		return "", fmt.Errorf("valor total inválido")
+	}
+	if total <= 0 {
+		return "", fmt.Errorf("o valor total precisa ser maior que zero")
+	}
+
+	people, err := strconv.Atoi(strings.TrimSpace(peopleRaw))
+	if err != nil {
+		return "", fmt.Errorf("quantidade de pessoas inválida")
+	}
+	if people < 1 {
+		return "", fmt.Errorf("a quantidade de pessoas precisa ser maior que zero")
+	}
+	if people > 300 {
+		return "", fmt.Errorf("quantidade de pessoas muito alta (máximo: 300)")
+	}
+
+	return buildPaymentListMessage(title, total, people, pix, pixOwner), nil
+}
+
+func splitAndTrim(input string, sep string) []string {
+	raw := strings.Split(input, sep)
+	parts := make([]string, 0, len(raw))
+	for _, part := range raw {
+		parts = append(parts, strings.TrimSpace(part))
+	}
+	return parts
+}
+
+func parseBrazilianMoney(raw string) (float64, error) {
+	sanitized := strings.TrimSpace(raw)
+	sanitized = strings.ReplaceAll(sanitized, "R$", "")
+	sanitized = strings.ReplaceAll(sanitized, "r$", "")
+	sanitized = strings.ReplaceAll(sanitized, " ", "")
+
+	hasDot := strings.Contains(sanitized, ".")
+	hasComma := strings.Contains(sanitized, ",")
+
+	switch {
+	case hasDot && hasComma:
+		sanitized = strings.ReplaceAll(sanitized, ".", "")
+		sanitized = strings.ReplaceAll(sanitized, ",", ".")
+	case hasComma:
+		sanitized = strings.ReplaceAll(sanitized, ",", ".")
+	case strings.Count(sanitized, ".") > 1:
+		sanitized = strings.ReplaceAll(sanitized, ".", "")
+	}
+
+	var cleaned strings.Builder
+	for i, r := range sanitized {
+		if r >= '0' && r <= '9' {
+			cleaned.WriteRune(r)
+			continue
+		}
+		if r == '.' {
+			cleaned.WriteRune(r)
+			continue
+		}
+		if r == '-' && i == 0 {
+			cleaned.WriteRune(r)
+		}
+	}
+
+	parsed := cleaned.String()
+	if parsed == "" || parsed == "." || parsed == "-" {
+		return 0, fmt.Errorf("valor inválido")
+	}
+
+	value, err := strconv.ParseFloat(parsed, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return math.Round(value*100) / 100, nil
+}
+
+func buildPaymentListMessage(title string, total float64, people int, pix string, pixOwner string) string {
+	perPerson := total / float64(people)
+
+	var out strings.Builder
+	out.WriteString(fmt.Sprintf("%s - R$%s\n\n", strings.ToUpper(strings.TrimSpace(title)), formatBrazilianNumber(total)))
+	out.WriteString(fmt.Sprintf("%s (por pessoa)\n\n", formatBrazilianNumber(perPerson)))
+	out.WriteString(fmt.Sprintf("Pix: %s\n\n", strings.TrimSpace(pix)))
+	out.WriteString(strings.TrimSpace(pixOwner))
+	out.WriteString("\n\n")
+
+	for i := 1; i <= people; i++ {
+		out.WriteString(fmt.Sprintf("%d-\n", i))
+	}
+
+	return strings.TrimRight(out.String(), "\n")
+}
+
+func formatBrazilianNumber(value float64) string {
+	rounded := math.Round(value*100) / 100
+	isNegative := rounded < 0
+	if isNegative {
+		rounded = -rounded
+	}
+
+	decimal := fmt.Sprintf("%.2f", rounded)
+	parts := strings.SplitN(decimal, ".", 2)
+
+	intPart := parts[0]
+	decimalPart := "00"
+	if len(parts) == 2 {
+		decimalPart = parts[1]
+	}
+
+	intPart = addThousandsSeparator(intPart, '.')
+
+	if isNegative {
+		return "-" + intPart + "," + decimalPart
+	}
+	return intPart + "," + decimalPart
+}
+
+func addThousandsSeparator(number string, separator rune) string {
+	if len(number) <= 3 {
+		return number
+	}
+
+	firstGroupLen := len(number) % 3
+	if firstGroupLen == 0 {
+		firstGroupLen = 3
+	}
+
+	var formatted strings.Builder
+	formatted.WriteString(number[:firstGroupLen])
+
+	for i := firstGroupLen; i < len(number); i += 3 {
+		formatted.WriteRune(separator)
+		formatted.WriteString(number[i : i+3])
+	}
+
+	return formatted.String()
+}
 
 func main() {
 	// Criar pasta para armazenar sessões
@@ -93,6 +413,17 @@ func main() {
 		return
 	}
 	fmt.Printf("📌 Grupo selecionado: %s\n", groupID)
+
+	groupJID, err := types.ParseJID(groupID)
+	if err != nil {
+		fmt.Printf("❌ ID de grupo inválido: %v\n", err)
+		client.Disconnect()
+		return
+	}
+
+	commandBot := newGroupCommandBot(client, groupJID)
+	client.AddEventHandler(commandBot.HandleEvent)
+	fmt.Println("🤖 Comandos ativos no grupo selecionado (use {criar cota})")
 
 	// Atualizar o nome do grupo imediatamente
 	updateGroupName(client, location, groupID)
