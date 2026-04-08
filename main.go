@@ -476,7 +476,7 @@ func main() {
 			// Verificar se o cliente ainda está conectado
 			if !client.IsConnected() {
 				fmt.Println("⚠️  Conexão perdida, reconectando...")
-				err := client.Connect()
+				err := connectClient(client)
 				if err != nil {
 					fmt.Printf("❌ Erro ao reconectar: %v\n", err)
 				} else {
@@ -631,7 +631,7 @@ func selectGroupID(client *whatsmeow.Client) (string, error) {
 	savedGroupID := loadSavedGroupID()
 	groups, err := getJoinedGroupsWithRetry(client, 3)
 	if err != nil {
-		if savedGroupID != "" {
+		if savedGroupID != "" && client.IsConnected() {
 			fmt.Printf("⚠️  Não foi possível listar grupos agora. Usando ID salvo: %s\n", savedGroupID)
 			return savedGroupID, nil
 		}
@@ -639,7 +639,7 @@ func selectGroupID(client *whatsmeow.Client) (string, error) {
 	}
 
 	if len(groups) == 0 {
-		if savedGroupID != "" {
+		if savedGroupID != "" && client.IsConnected() {
 			fmt.Printf("⚠️  Nenhum grupo retornado. Usando ID salvo: %s\n", savedGroupID)
 			return savedGroupID, nil
 		}
@@ -703,13 +703,8 @@ func getJoinedGroupsWithRetry(client *whatsmeow.Client, attempts int) ([]*types.
 	for i := 1; i <= attempts; i++ {
 		if !client.IsConnected() {
 			fmt.Printf("⚠️  Cliente desconectado ao listar grupos. Reconectando (%d/%d)...\n", i, attempts)
-			if err := client.Connect(); err != nil {
+			if err := connectClient(client); err != nil {
 				lastErr = err
-				time.Sleep(2 * time.Second)
-				continue
-			}
-			if !waitForConnectionWithRetry(client, 2, 15*time.Second) {
-				lastErr = fmt.Errorf("não conectou após reconexão")
 				time.Sleep(2 * time.Second)
 				continue
 			}
@@ -740,12 +735,11 @@ func updateGroupName(client *whatsmeow.Client, location *time.Location, groupID 
 	// Verificar se está conectado
 	if !client.IsConnected() {
 		fmt.Println("⚠️  Cliente não está conectado! Tentando reconectar...")
-		err := client.Connect()
+		err := connectClient(client)
 		if err != nil {
 			fmt.Printf("❌ Erro ao reconectar: %v\n", err)
 			return
 		}
-		time.Sleep(2 * time.Second)
 	}
 
 	// Atualizar o nome do grupo
