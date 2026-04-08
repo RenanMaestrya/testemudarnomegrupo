@@ -187,7 +187,7 @@ func connectClient(client *whatsmeow.Client) error {
 		if err := client.Connect(); err != nil {
 			return err
 		}
-		if !client.WaitForConnection(20 * time.Second) {
+		if !waitForConnectionWithRetry(client, 2, 20*time.Second) {
 			return fmt.Errorf("timeout ao estabelecer conexão websocket")
 		}
 		return nil
@@ -208,7 +208,9 @@ func connectClient(client *whatsmeow.Client) error {
 		case whatsmeow.QRChannelEventCode:
 			qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 		case "success":
-			if !client.WaitForConnection(20 * time.Second) {
+			// Em alguns ambientes o pareamento conclui e o websocket cai logo em seguida.
+			// Nesses casos, tentamos reconectar automaticamente antes de falhar.
+			if !waitForConnectionWithRetry(client, 3, 20*time.Second) {
 				return fmt.Errorf("pareamento concluído, mas websocket não conectou")
 			}
 			return nil
@@ -230,6 +232,26 @@ func connectClient(client *whatsmeow.Client) error {
 		return nil
 	}
 	return fmt.Errorf("canal de pareamento foi encerrado sem conexão")
+}
+
+func waitForConnectionWithRetry(client *whatsmeow.Client, attempts int, timeout time.Duration) bool {
+	if attempts < 1 {
+		attempts = 1
+	}
+	for i := 1; i <= attempts; i++ {
+		if client.IsConnected() || client.WaitForConnection(timeout) {
+			return true
+		}
+		if i == attempts {
+			break
+		}
+		fmt.Printf("⚠️  Conexão não estabilizou após pareamento. Tentando reconectar (%d/%d)...\n", i+1, attempts)
+		if err := client.Connect(); err != nil {
+			fmt.Printf("⚠️  Reconexão falhou: %v\n", err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return client.IsConnected()
 }
 
 // Função para calcular dias restantes até a data alvo (baseado em data, não hora)
@@ -276,8 +298,7 @@ func saveGroupID(groupID string) error {
 
 func selectGroupID(client *whatsmeow.Client) (string, error) {
 	savedGroupID := loadSavedGroupID()
-	ctx := context.Background()
-	groups, err := client.GetJoinedGroups(ctx)
+	groups, err := getJoinedGroupsWithRetry(client, 3)
 	if err != nil {
 		if savedGroupID != "" {
 			fmt.Printf("⚠️  Não foi possível listar grupos agora. Usando ID salvo: %s\n", savedGroupID)
@@ -339,6 +360,39 @@ func selectGroupID(client *whatsmeow.Client) (string, error) {
 		}
 		return selected, nil
 	}
+}
+
+func getJoinedGroupsWithRetry(client *whatsmeow.Client, attempts int) ([]*types.GroupInfo, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	ctx := context.Background()
+	var lastErr error
+
+	for i := 1; i <= attempts; i++ {
+		if !client.IsConnected() {
+			fmt.Printf("⚠️  Cliente desconectado ao listar grupos. Reconectando (%d/%d)...\n", i, attempts)
+			if err := client.Connect(); err != nil {
+				lastErr = err
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			if !waitForConnectionWithRetry(client, 2, 15*time.Second) {
+				lastErr = fmt.Errorf("não conectou após reconexão")
+				time.Sleep(2 * time.Second)
+				continue
+			}
+		}
+
+		groups, err := client.GetJoinedGroups(ctx)
+		if err == nil {
+			return groups, nil
+		}
+		lastErr = err
+		time.Sleep(2 * time.Second)
+	}
+
+	return nil, lastErr
 }
 
 // Função para atualizar o nome do grupo
